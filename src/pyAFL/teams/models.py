@@ -156,7 +156,9 @@ class Team(object):
             dfs.append(df)
 
         games = pd.concat(dfs)
-        games.index = pd.to_datetime(games.Date)
+        games.index = pd.to_datetime(
+            games.Date, format="%a %d-%b-%Y %I:%M %p", errors="raise"
+        )
         games = games.sort_index()
 
         games = games.rename(
