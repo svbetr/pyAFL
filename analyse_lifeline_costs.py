@@ -3,59 +3,9 @@ import numpy as np
 from math import comb
 from functools import reduce
 import operator as op
+import itertools
 
-
-leg_df = pd.read_parquet("data/sgm_leg_data_results.parquet")
-
-leg_df[["DI", "TK", "MK", "GL"]] = leg_df[["DI", "TK", "MK", "GL"]].fillna(0)
-
-# See how many things (disposals, tackles, goals) a leg missed by
-leg_df["n_missed_by"] = np.nan
-for stat_column, counts_column in zip(
-    ["disposals", "tackles", "marks", "goals"], ["DI", "TK", "MK", "GL"]
-):
-    leg_df.loc[leg_df.stat == stat_column, "n_missed_by"] = (
-        leg_df.loc[leg_df.stat == stat_column, "threshold"]
-        - leg_df.loc[leg_df.stat == stat_column, counts_column]
-    ).clip(0)
-
-
-# Flags for disposals missing by up to N
-for i in range(1, 6):
-    leg_df[f"disposals_missed_by_{i}"] = (
-        leg_df["stat"].eq("disposals")
-        & leg_df["leg_won"].eq(False)
-        & (leg_df["n_missed_by"]).le(
-            i
-        )  # losing by at least i- we don't need a gt(0) in there because we already have the leg lost
-    )
-
-
-leg_df["is_disposal_leg"] = leg_df["stat"].eq("disposals")
-
-# Make our overall bets table by combining the legs
-bets = leg_df.groupby(["bet_id"]).agg(
-    season=("year", "first"),
-    event_date=("date", "first"),
-    turnover_bonus_bet=("turnover_bonus_bet", "sum"),
-    turnover_cash=("turnover_cash", "sum"),
-    turnover_total=("turnover_total", "sum"),
-    bet_fixed_odds=("bet_fixed_odds", "first"),
-    payout=("payout", "sum"),
-    net_win=("net_win", "sum"),
-    n_legs=("sgm_leg_count", "max"),
-    n_disp_legs=("is_disposal_leg", "sum"),
-    n_winning_legs=("leg_won", "sum"),
-    disp_leg_missed_by_1=("disposals_missed_by_1", "sum"),
-    disp_leg_missed_by_2=("disposals_missed_by_2", "sum"),
-    disp_leg_missed_by_3=("disposals_missed_by_3", "sum"),
-    disp_leg_missed_by_4=("disposals_missed_by_4", "sum"),
-    disp_leg_missed_by_5=("disposals_missed_by_5", "sum"),
-)
-bets["bet_won"] = bets["payout"] < 0
-bets["lost_by_one_leg"] = bets["n_legs"] - bets["n_winning_legs"] == 1
-bets["liability"] = bets["turnover_total"] * bets["bet_fixed_odds"].astype(float)
-bets["n_losing_legs"] = bets["n_legs"] - bets["n_winning_legs"]
+MAX_BUCKET = 10  # Largest number of disposals we could save
 
 
 def _expected_liability_row(row, n_lifelines: int):
@@ -70,6 +20,48 @@ def _expected_liability_row(row, n_lifelines: int):
         * comb(row.n_disp_legs - n_losing, n_lifelines - n_losing)
         / comb(row.n_disp_legs, n_lifelines)
     )
+
+
+def make_disp_miss_list(s: pd.Series) -> tuple[int, ...]:
+    # s is the disp_miss_exact column for a single bet
+    v = s.dropna().astype(int).tolist()
+    return tuple(sorted(v, reverse=True))  # largest miss first helps later
+
+
+def make_disp_miss_hist(s: pd.Series) -> list[int]:
+    v = s.dropna().astype(int)
+    if v.empty:
+        return [0] * MAX_BUCKET  # indices 0..9 represent misses 1..10+ for example
+    clipped = np.clip(v, 1, MAX_BUCKET)
+    # bincount expects 0-based; shift by -1
+    hist = np.bincount(clipped - 1, minlength=MAX_BUCKET)
+    return hist.tolist()
+
+
+def success_probability(misses, lifelines):
+    # misses: e.g. [5,3,2,0,0]
+    # lifelines: e.g. [5,3,2]  (treated as distinct; order matters)
+    legs = list(range(len(misses)))
+    losing = {i for i, m in enumerate(misses) if m > 0}
+
+    total = 0
+    success = 0
+
+    for chosen_legs in itertools.permutations(legs, r=len(lifelines)):
+        total += 1
+
+        # map chosen leg -> lifeline value
+        assignment = {leg_idx: L for L, leg_idx in zip(lifelines, chosen_legs)}
+
+        # 1) every losing leg must be targeted by some lifeline
+        if not losing.issubset(assignment.keys()):
+            continue
+
+        # 2) and that lifeline must be strong enough
+        if all(assignment[i] >= misses[i] for i in losing):
+            success += 1
+
+    return success / total if total else 0.0
 
 
 def lifeline_summary(
@@ -114,42 +106,97 @@ def lifeline_summary(
     )
 
 
-vals = {
-    "n_legs": [4, 6, 8, 6, 8, 10],
-    "n_lifelines": [1, 2, 3],
-    "lifeline_size": [1, 2, 3, 4, 5],
-}
-combinations = pd.MultiIndex.from_product(vals.values(), names=vals.keys()).to_frame(
-    index=False
-)
+if __name__ == "__main__":
 
+    leg_df = pd.read_parquet("data/sgm_leg_data_results.parquet")
 
-results = []
-for index, row in combinations.iterrows():
-    tmp = lifeline_summary(
-        bets,
-        n_legs=row.n_legs,
-        n_lifelines=row.n_lifelines,
-        disposal_missed_by_column=f"disp_leg_missed_by_{row.lifeline_size}",
+    leg_df[["DI", "TK", "MK", "GL"]] = leg_df[["DI", "TK", "MK", "GL"]].fillna(0)
+
+    # See how many things (disposals, tackles, goals) a leg missed by
+    leg_df["is_disposal_leg"] = leg_df["stat"].eq("disposals")
+
+    leg_df["disp_miss_exact"] = np.where(
+        leg_df["is_disposal_leg"] & (~leg_df["leg_won"]),
+        leg_df["n_missed_by"].astype("Int64"),
+        pd.NA,
     )
-    tmp.insert(0, "n_legs", row.n_legs)
-    tmp.insert(1, "n_lifelines", row.n_lifelines)
-    tmp.insert(2, "lifeline_extra_disposals", row.lifeline_size)
-    results.append(tmp)
-final = pd.concat(results, axis=0)
-final.loc[2025].to_csv("2025_lifeline_data.csv")
 
+    # Find all disposal legs
+    disp_only = leg_df.loc[
+        leg_df["stat"].eq("disposals"), ["bet_id", "leg_won", "n_missed_by"]
+    ].copy()
+    # Sort so losses (biggest first) appear before wins
+    disp_only = disp_only.sort_values(["bet_id", "miss_by"], ascending=[True, False])
 
-# combinations = pd.DataFrame(
-#     data=dict(
-#         n_legs=[4, 4, 6, 6, 8, 8, 6, 6, 8, 8, 10, 10],
-#         n_lifelines=[1, 1, 2, 2, 3, 3, 1, 1, 2, 2, 3, 3],
-#         disposal_missed_by_column=[
-#             "disp_leg_missed_by_one",
-#             "disp_leg_missed_by_two",
-#             "disp_leg_missed_by_five",
-#         ],
-#         *6,
-#         lifeline_size=[1, 2] * 6,
-#     )
-# )
+    # this makes an ordered list of how many disposals each leg lost by, grouped at the bet level
+    # It's a ragged list of
+    disp_all_list = (
+        disp_only.groupby("bet_id")["miss_by"]
+        .apply(list)
+        .rename("disp_miss_by_including_wins")
+    )
+
+    # Make our overall bets table by combining the legs
+    bets = leg_df.groupby(["bet_id"]).agg(
+        season=("year", "first"),
+        event_date=("date", "first"),
+        turnover_bonus_bet=("turnover_bonus_bet", "sum"),
+        turnover_cash=("turnover_cash", "sum"),
+        turnover_total=("turnover_total", "sum"),
+        bet_fixed_odds=("bet_fixed_odds", "first"),
+        payout=("payout", "sum"),
+        net_win=("net_win", "sum"),
+        n_legs=("sgm_leg_count", "max"),
+        n_disp_legs=("is_disposal_leg", "sum"),
+        n_winning_legs=("leg_won", "sum"),
+        disp_leg_missed_by_1=("disposals_missed_by_1", "sum"),
+        disp_leg_missed_by_2=("disposals_missed_by_2", "sum"),
+        disp_leg_missed_by_3=("disposals_missed_by_3", "sum"),
+        disp_leg_missed_by_4=("disposals_missed_by_4", "sum"),
+        disp_leg_missed_by_5=("disposals_missed_by_5", "sum"),
+    )
+    bets["bet_won"] = bets["payout"] < 0
+    bets["lost_by_one_leg"] = bets["n_legs"] - bets["n_winning_legs"] == 1
+    bets["liability"] = bets["turnover_total"] * bets["bet_fixed_odds"].astype(float)
+    bets["n_losing_legs"] = bets["n_legs"] - bets["n_winning_legs"]
+
+    # Merge onto the list of how many misses each disposal leg had
+    bets = bets.merge(disp_all_list, how="left", left_index=True, right_index=True)
+
+    vals = {
+        "n_legs": [4, 6, 8, 6, 8, 10],
+        "n_lifelines": [1, 2, 3],
+        "lifeline_size": [1, 2, 3, 4, 5],
+    }
+    combinations = pd.MultiIndex.from_product(
+        vals.values(), names=vals.keys()
+    ).to_frame(index=False)
+
+    results = []
+    for index, row in combinations.iterrows():
+        tmp = lifeline_summary(
+            bets,
+            n_legs=row.n_legs,
+            n_lifelines=row.n_lifelines,
+            disposal_missed_by_column=f"disp_leg_missed_by_{row.lifeline_size}",
+        )
+        tmp.insert(0, "n_legs", row.n_legs)
+        tmp.insert(1, "n_lifelines", row.n_lifelines)
+        tmp.insert(2, "lifeline_extra_disposals", row.lifeline_size)
+        results.append(tmp)
+    final = pd.concat(results, axis=0)
+    final.loc[2025].to_csv("2025_lifeline_data.csv")
+
+    # combinations = pd.DataFrame(
+    #     data=dict(
+    #         n_legs=[4, 4, 6, 6, 8, 8, 6, 6, 8, 8, 10, 10],
+    #         n_lifelines=[1, 1, 2, 2, 3, 3, 1, 1, 2, 2, 3, 3],
+    #         disposal_missed_by_column=[
+    #             "disp_leg_missed_by_one",
+    #             "disp_leg_missed_by_two",
+    #             "disp_leg_missed_by_five",
+    #         ],
+    #         *6,
+    #         lifeline_size=[1, 2] * 6,
+    #     )
+    # )
