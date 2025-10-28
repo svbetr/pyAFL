@@ -21,6 +21,9 @@ dependencies = [
   "ipython>=9.6.0",
   "ipdb>=0.13.13",
   "lxml>=6.0.2",
+  "matplotlib>=3.10.7",
+  "snowflake-connector-python>=4.0.0",
+  "scipy>=1.16.2",
 ]
 
 [tool.setuptools.packages.find]

@@ -1,14 +1,13 @@
-from pyAFL.players.models import Player
 from pyAFL.teams import CURRENT_TEAMS
 from pyAFL.utils import match_utils
 import pandas as pd
 import numpy as np
-
+from pathlib import Path
 
 if __name__ == "__main__":
 
     print("Getting data for current teams")
-
+    seasons = [2025, 2024, 2023, 2022, 2021]
     team_df = pd.read_csv("data/dim-team/teams.csv")
     alias_df = pd.read_csv("data/dim-team/team_aliases.csv")
 
@@ -23,6 +22,9 @@ if __name__ == "__main__":
         g["Date"] = pd.to_datetime(
             g["Date"], format="%a %d-%b-%Y %I:%M %p", errors="raise"
         )
+        g["year"] = g["Date"].dt.year
+
+        g["Rnd"] = g["Rnd"].str.strip("R")
 
         team_name = g["Team"].apply(match_utils.consistent_name)
         opp_name = g["Opponent"].apply(match_utils.consistent_name)
@@ -47,7 +49,7 @@ if __name__ == "__main__":
 
         # Make our gameID column
         g["gameID"] = g.apply(
-            lambda r: f"{r.Date.date()}-{r.team_1}-{r.team_2}", axis=1
+            lambda r: f"{r.Date.date()}-R-{r.Rnd}-{r.team_1}-{r.team_2}", axis=1
         )
 
         # Set the result- have either winning team name or 'draw'
@@ -95,4 +97,7 @@ if __name__ == "__main__":
         ~match_df["team_2_id"].isna(), match_df["team_2"].map(alias_map)
     )
 
-    match_df.to_parquet("data/dim-matches/matches.parquet")
+    for season in seasons:
+        p = Path(f"data/stats-team-match/season={season}")
+        p.mkdir(exist_ok=True, parents=True)
+        match_df.loc[match_df.year == season].to_parquet(p / "stats-team-match.parquet")

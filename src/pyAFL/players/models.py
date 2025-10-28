@@ -110,9 +110,12 @@ class Player(object):
                     continue
 
                 debut = debut.split(" ")
+                years = int(debut[0][:-1]) if debut else 0
+                days = int(debut[1][:-1]) if len(debut) > 1 else 0
+
                 timestamp = (
                     datetime.strptime(self.metadata["born"], "%d-%b-%Y")
-                    + timedelta(int(debut[0][:-1]) * 365 + int(debut[1][:-1]))
+                    + timedelta(days=years * 365 + days)
                 ).strftime("%d-%b-%Y")
                 self.metadata["debut"] = timestamp
 
@@ -123,9 +126,12 @@ class Player(object):
                     continue
 
                 last = last.split(" ")
+                years = int(last[0][:-1]) if last else 0
+                days = int(last[1][:-1]) if len(last) > 1 else 0
+
                 timestamp = (
                     datetime.strptime(self.metadata["born"], "%d-%b-%Y")
-                    + timedelta(int(last[0][:-1]) * 365 + int(last[1][:-1]))
+                    + timedelta(days=years * 365 + days)
                 ).strftime("%d-%b-%Y")
                 self.metadata["last"] = timestamp
 
