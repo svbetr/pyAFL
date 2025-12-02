@@ -6,8 +6,11 @@ tbs_sql = """
 select
     B.bet_id,
     B.client_id,
+    B.USER_RESIDENCE_STATE,
+    B.event_country,
+    CD.pre_gen_ngr_band,
     B.bet_leg_id,
-    event_start_at::DATE as DATE,
+    event_start_at::date as date,
     SGM_LEG_COUNT,
     TURNOVER_CASH,
     TURNOVER_BONUS_BET,
@@ -21,25 +24,29 @@ select
     EVENT_CLASS,
     EVENT,
     OUTCOME,
-    BD.PAYOUTPRICE > 0 as LEG_WON,
-    BD.payout > 0 AS BET_WON
+    BD.FIXEDPRICE as leg_price,
+    (BD.PAYOUTPRICE > 0) as LEG_WON,
+    (BD.payout > 0)  AS BET_WON
 from dwh.core.vw_bets B
-inner join tbs.dbo.betdetail BD
-on BD.betdetailid = B.bet_leg_id
-inner join dwh.core.vw_client C
-on C.client_id = B.client_id
+join tbs.dbo.betdetail BD
+  on BD.betdetailid = B.bet_leg_id
+join dwh.core.vw_client C
+  on C.client_id = B.client_id
+join dwh.core.tbl_crm_daily CD
+  on CD.client_id = B.client_id
+ and CD.date = B.event_start_at::date
 where
     master_event_type = 'Sports'
     and event_type = 'Australian Rules'
     and MASTER_CATEGORY = 'AFL'
     and bet_type_code = 'SGMUL'
-    and event_start_at::DATE >= '2022-01-01'
+    and event_start_at::date >= '2022-01-01'
     and SGM_LEG_COUNT > 1
     and is_resulted
     and is_reportable
     and turnover_cash > 0
     and not C.client_profile_is_negative_factor
-    and BD.mds_valid_to_dts is null
+    and BD.mds_valid_to_dts is null;
 """
 
 config = snowflake_utils.get_snowflake_connection_dict()

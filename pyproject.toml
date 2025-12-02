@@ -27,4 +27,4 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]   # your package lives at src/nrl_scraper
+where = ["src"]
