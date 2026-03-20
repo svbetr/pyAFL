@@ -58,6 +58,7 @@ if __name__ == "__main__":
         bet_fixed_odds=("bet_fixed_odds", "first"),
         payout=("payout", "sum"),
         net_win=("net_win", "sum"),
+        gross_win=("gross_win_cash", "sum"),
         n_legs=("sgm_leg_count", "max"),
         n_disp_legs=("is_disposal_leg", "sum"),
         n_winning_legs=("leg_won", "sum"),

@@ -235,7 +235,26 @@ combined = final.merge(
     how="left",
 )
 
-combined.to_parquet("data/sgm_leg_data_results.parquet")
+# Add the match stats
+# Get the player/match stats
+match_stats = (
+    con.execute(
+        "select * from parquet_scan('data/stats-team-match/season=*/*.parquet');"
+    )
+    .df()
+    .fillna(0.0)
+)
+# JOin to the final table
+combined = combined.merge(
+    match_stats[
+        ["gameID", "total_points", "team_1", "t1_points", "team_2", "t2_points"]
+    ],
+    left_on=["gameID"],
+    right_on=["gameID"],
+    how="left",
+)
+
+# combined.to_parquet("data/sgm_leg_data_results.parquet")
 
 # # Now only keep bets where we have all of their legs
 # bets = evaluated_legs.groupby(["bet_id"]).agg(

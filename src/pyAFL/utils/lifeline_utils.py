@@ -44,7 +44,7 @@ def would_win_with_lifelines(
 def _expected_liability_row(row, lifelines: List[int]):
 
     return row["liability"] * success_probability(
-        row.disp_miss_by_including_wins, lifelines
+        row.wildcard_miss_by_including_wins, lifelines
     )
 
 
@@ -69,6 +69,11 @@ def success_probability(misses, lifelines):
     misses: list like [5,3,2,0,0] (0 = winning leg)
     lifelines: list like [5,4,3,2,1] (identities distinct; order matters)
     """
+    misses = np.atleast_1d(misses)
+
+    if not np.all(np.isfinite(misses)):
+        return 0.0
+
     n = len(misses)
     k = len(lifelines)
     if k == 0:
@@ -116,29 +121,60 @@ def lifeline_summary(
     """
     # Base mask: correct product and the bet lost
     base = bets.loc[
-        (bets.n_legs.eq(n_legs)) & (~bets.bet_won) & (bets.all_losing_are_disposals)
+        (bets.n_legs.eq(n_legs)) & (~bets.bet_won) & (bets.all_losing_are_wildcard)
     ].copy()
 
     # Accept any "missed by m" with m in 1..K (and optionally enforce wins == L - m)
     # This loops over the cases where bets miss by 1 for 1 lifeline, 1 or 2 for 2 lifelines, etc
-    mask = base["disp_miss_by_including_wins"].apply(
+    mask = base["wildcard_miss_by_including_wins"].apply(
         would_win_with_lifelines, lifelines=lifelines
     )
 
+    base["would_win_with_lifelines"] = mask
     df = base.loc[mask].copy()
 
-    # Expected liability per row (pass the extra arg via apply kwargs)
-    df["expected_liability"] = df.apply(
-        _expected_liability_row, axis=1, lifelines=lifelines
+    bet_save_fraction = base.groupby("season").agg(
+        fraction_saved=("would_win_with_lifelines", "mean"),
+        N_bets_total=("event_country", "count"),
     )
 
-    # Aggregate
-    return df.groupby(season_col).agg(
-        worst_case_bets=("liability", "count"),
-        worst_case_turnover=("turnover_total", "sum"),
-        worst_case_payout=("liability", "sum"),
-        expected_payout=("expected_liability", "sum"),
-        rpf_fees=("rpf_fee", "sum"),
-        poc_fees=("poc_fee", "sum"),
-        gross_win_of_original_bets=("gross_win", "sum"),
-    )
+    if len(df) > 0:
+
+        # Expected liability per row (pass the extra arg via apply kwargs)
+        df["expected_liability"] = df.apply(
+            _expected_liability_row, axis=1, lifelines=lifelines
+        )
+
+        # Aggregate
+        agg = (
+            df.groupby(season_col)
+            .agg(
+                worst_case_bets=("liability", "count"),
+                worst_case_turnover=("turnover_total", "sum"),
+                worst_case_payout=("liability", "sum"),
+                expected_payout=("expected_liability", "sum"),
+                rpf_fees=("rpf_fee", "sum"),
+                poc_fees=("poc_fee", "sum"),
+                gross_win_of_original_bets=("gross_win", "sum"),
+            )
+            .reindex(base[season_col].unique())
+            .fillna(0.0)
+        )
+
+        return agg.join(bet_save_fraction)
+    else:
+        index = base[season_col].unique()
+        zeros = [0] * len(index)
+        return pd.DataFrame(
+            data=dict(
+                worst_case_bets=zeros,
+                worst_case_turnover=zeros,
+                worst_case_payout=zeros,
+                expected_payout=zeros,
+                rpf_fees=zeros,
+                poc_fees=zeros,
+                gross_win_of_original_bets=zeros,
+                fraction_saved=zeros,
+            ),
+            index=index,
+        )
