@@ -10,6 +10,8 @@ select
     B.event_country,
     CD.pre_gen_ngr_band,
     B.bet_leg_id,
+    B.BET_DETAIL_TYPE_CODE,
+    B.MARKET_TYPE_CODE,
     event_start_at::date as date,
     SGM_LEG_COUNT,
     TURNOVER_CASH,
@@ -24,6 +26,7 @@ select
     EVENT_CLASS,
     EVENT,
     OUTCOME,
+    B.POINTS as PYOL_POINTS,
     BD.FIXEDPRICE as leg_price,
     (BD.PAYOUTPRICE > 0) as LEG_WON,
     (BD.payout > 0)  AS BET_WON
@@ -244,17 +247,26 @@ match_stats = (
     .df()
     .fillna(0.0)
 )
+match_stats["game_margin_signed"] = match_stats["t1_points"] - match_stats["t2_points"]
 # JOin to the final table
 combined = combined.merge(
     match_stats[
-        ["gameID", "total_points", "team_1", "t1_points", "team_2", "t2_points"]
+        [
+            "gameID",
+            "total_points",
+            "team_1",
+            "t1_points",
+            "team_2",
+            "t2_points",
+            "game_margin_signed",
+        ]
     ],
     left_on=["gameID"],
     right_on=["gameID"],
     how="left",
 )
 
-# combined.to_parquet("data/sgm_leg_data_results.parquet")
+combined.to_parquet("data/sgm_leg_data_results.parquet")
 
 # # Now only keep bets where we have all of their legs
 # bets = evaluated_legs.groupby(["bet_id"]).agg(

@@ -90,8 +90,10 @@ def evaluate_sgm_legs(
         ].to_numpy()
 
     # Match result → margin > 0 for chosen team
-    legs_res = out.query("subject_type=='team' and stat=='margin'").copy()
-    print(f"Evaluating {len(legs_res)} match result and margin legs...")
+    legs_res = out.query(
+        "subject_type=='team' and stat in ('margin', 'handicap_pyol')"
+    ).copy()
+    print(f"Evaluating {len(legs_res)} match result, PYOL and margin legs...")
     if not legs_res.empty:
 
         m = team_match_stats[
@@ -122,12 +124,21 @@ def evaluate_sgm_legs(
 
         legs_res["actual"] = legs_res["margin"]
 
+        # Check using our comparisons if the leg won
         legs_res["won"] = [
-            ops[c](a, t) if pd.notna(a) and c in ops else np.nan
-            for c, a, t in zip(
-                legs_res["comparator"], legs_res["actual"], legs_res["threshold"]
+            (
+                (ops[c](a, t) and (np.isnan(tu) or a <= tu))
+                if pd.notna(a) and c in ops
+                else np.nan
+            )
+            for c, a, t, tu in zip(
+                legs_res["comparator"],
+                legs_res["actual"],
+                legs_res["threshold"],
+                legs_res["threshold_upper"],
             )
         ]
+
         out.loc[legs_res.index, ["actual", "won"]] = legs_res[
             ["actual", "won"]
         ].to_numpy()
@@ -223,6 +234,7 @@ def normalize_leg(row):
         stat=None,
         comparator=None,
         threshold=np.nan,
+        threshold_upper=np.nan,
         scope="match",
         expected_ht=np.nan,
         expected_ft=np.nan,
@@ -280,15 +292,57 @@ def normalize_leg(row):
 
     # Match Result (team to win) → margin > 0
     if market == "Draw No Bet":
+
+        # Get the team ID
         tid = map_team(out, row)
-        return {
-            **base,
-            "subject_type": "team",
-            "subject_id": tid,
-            "stat": "margin",
-            "comparator": ">",
-            "threshold": 0.0,
-        }
+
+        # Set up the Handicap values
+        if row.bet_detail_type_code == "HC":
+
+            threshold = row.pyol_points
+            return {
+                **base,
+                "subject_type": "team",
+                "subject_id": tid,
+                "stat": "handicap_pyol",
+                "comparator": ">",
+                "threshold": threshold,
+            }
+        elif row.bet_detail_type_code == "M1-39":
+
+            # Need something here to say that margin must be between 1 and 39
+
+            return {
+                **base,
+                "subject_type": "team",
+                "subject_id": tid,
+                "stat": "margin",
+                "comparator": ">",
+                "threshold": 0.0,
+                "threshold_upper": 39,
+            }
+        elif row.bet_detail_type_code == "M40+":
+
+            # Need something here to say that margin must be between 1 and 39
+
+            return {
+                **base,
+                "subject_type": "team",
+                "subject_id": tid,
+                "stat": "margin",
+                "comparator": ">=",
+                "threshold": 40.0,
+            }
+
+        elif row.bet_detail_type_code == "WIN":
+            return {
+                **base,
+                "subject_type": "team",
+                "subject_id": tid,
+                "stat": "margin",
+                "comparator": ">",
+                "threshold": 0.0,
+            }
 
     # Totals (full-time)
     if market == "Total Match Points":

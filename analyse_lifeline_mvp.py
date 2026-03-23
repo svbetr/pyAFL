@@ -5,7 +5,44 @@ from pyAFL.utils.lifeline_utils import lifeline_summary
 
 # --- Constants ---
 
-WILDCARD_LEG_TYPES = ["disposals"]
+WILDCARD_LEG_TYPES = ["disposals", "total_points", "handicap_pyol"]
+
+# Lifeline value (bonus) applied to each stat type.
+# A losing wildcard leg is "saveable" if it missed by <= its lifeline_value.
+LIFELINE_VALUES = pd.DataFrame(
+    data=[
+        # Disposals
+        {"stat": "disposals", "lifeline_fraction": 0.05, "n_legs": 4},
+        {"stat": "disposals", "lifeline_fraction": 0.05, "n_legs": 5},
+        {"stat": "disposals", "lifeline_fraction": 0.1, "n_legs": 6},
+        {"stat": "disposals", "lifeline_fraction": 0.1, "n_legs": 7},
+        {"stat": "disposals", "lifeline_fraction": 0.1, "n_legs": 8},
+        {"stat": "disposals", "lifeline_fraction": 0.1, "n_legs": 9},
+        {"stat": "disposals", "lifeline_fraction": 0.15, "n_legs": 10},
+        {"stat": "disposals", "lifeline_fraction": 0.15, "n_legs": 11},
+        {"stat": "disposals", "lifeline_fraction": 0.15, "n_legs": 12},
+        # Total Points
+        {"stat": "total_points", "lifeline_fraction": 0.01, "n_legs": 4},
+        {"stat": "total_points", "lifeline_fraction": 0.01, "n_legs": 5},
+        {"stat": "total_points", "lifeline_fraction": 0.02, "n_legs": 6},
+        {"stat": "total_points", "lifeline_fraction": 0.02, "n_legs": 7},
+        {"stat": "total_points", "lifeline_fraction": 0.03, "n_legs": 8},
+        {"stat": "total_points", "lifeline_fraction": 0.03, "n_legs": 9},
+        {"stat": "total_points", "lifeline_fraction": 0.03, "n_legs": 10},
+        {"stat": "total_points", "lifeline_fraction": 0.03, "n_legs": 11},
+        {"stat": "total_points", "lifeline_fraction": 0.03, "n_legs": 12},
+        # Handicap PYOL
+        {"stat": "handicap_pyol", "lifeline_fraction": 0.1, "n_legs": 4},
+        {"stat": "handicap_pyol", "lifeline_fraction": 0.1, "n_legs": 5},
+        {"stat": "handicap_pyol", "lifeline_fraction": 0.1, "n_legs": 6},
+        {"stat": "handicap_pyol", "lifeline_fraction": 0.1, "n_legs": 7},
+        {"stat": "handicap_pyol", "lifeline_fraction": 0.1, "n_legs": 8},
+        {"stat": "handicap_pyol", "lifeline_fraction": 0.1, "n_legs": 9},
+        {"stat": "handicap_pyol", "lifeline_fraction": 0.15, "n_legs": 10},
+        {"stat": "handicap_pyol", "lifeline_fraction": 0.15, "n_legs": 11},
+        {"stat": "handicap_pyol", "lifeline_fraction": 0.15, "n_legs": 12},
+    ]
+)
 
 LOW_BANDS = ["NGR Band 7: $0 - $25", "NGR Band 6: $25 - $50"]
 HIGH_BANDS = [
@@ -23,11 +60,12 @@ STAT_TO_COLUMN = {
     "marks": "MK",
     "goals": "GL",
     "total_points": "total_points",
+    "handicap_pyol": "game_margin_signed",
 }
 
 SUMMARY_COLS = [
     "n_legs",
-    "lifelines",
+    "n_activations",
     "expected_payout",
     "worst_case_bets",
     "worst_case_payout",
@@ -56,6 +94,12 @@ def load_fees() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 def engineer_leg_features(leg_df: pd.DataFrame) -> pd.DataFrame:
     leg_df = leg_df.copy()
+
+    # Add the tier names
+    leg_df["tier"] = ""
+    leg_df.loc[leg_df.pre_gen_ngr_band.isin(LOW_BANDS), "tier"] = "low"
+    leg_df.loc[leg_df.pre_gen_ngr_band.isin(HIGH_BANDS), "tier"] = "high"
+
     leg_df[["DI", "TK", "MK", "GL"]] = leg_df[["DI", "TK", "MK", "GL"]].fillna(0)
 
     leg_df["is_wildcard_leg"] = leg_df["stat"].isin(WILDCARD_LEG_TYPES)
@@ -65,7 +109,7 @@ def engineer_leg_features(leg_df: pd.DataFrame) -> pd.DataFrame:
         f" ({leg_df.is_wildcard_leg.sum() / len(leg_df):.1%})"
     )
 
-    # Find how many each column missed by
+    # Find how many each leg missed by
     over_under_factor = np.where(leg_df["comparator"].isin([">", ">="]), 1, -1)
     leg_df["n_missed_by"] = np.nan
     for stat_column, counts_column in STAT_TO_COLUMN.items():
@@ -78,16 +122,39 @@ def engineer_leg_features(leg_df: pd.DataFrame) -> pd.DataFrame:
     return leg_df
 
 
-def build_bets(leg_df: pd.DataFrame) -> pd.DataFrame:
-    # Ordered list of how many each wildcard leg missed by, grouped at bet level
-    wildcard_miss_by = (
-        leg_df.loc[leg_df["stat"].isin(WILDCARD_LEG_TYPES), ["bet_id", "n_missed_by"]]
-        .sort_values(["bet_id", "n_missed_by"], ascending=[True, False])
-        .groupby("bet_id")["n_missed_by"]
-        .apply(list)
-        .rename("wildcard_miss_by_including_wins")
+def assign_lifeline_values(
+    leg_df: pd.DataFrame, lifeline_values: dict[str, int]
+) -> pd.DataFrame:
+    """
+    Join a per-stat lifeline value to each leg, then classify losing wildcard legs
+    as saveable (missed by <= wildcard_value) or unsaveable.
+    """
+    leg_df = leg_df.copy()
+    leg_df = leg_df.merge(
+        LIFELINE_VALUES,
+        left_on=["stat", "sgm_leg_count"],
+        right_on=["stat", "n_legs"],
+        how="left",
+    ).drop("n_legs", axis=1)
+
+    # Turn the lifeline percentage into an integer value
+    # We round *down* each lifeline fractional value, but then always have at least 1 as a minimum
+    leg_df["wildcard_value"] = np.floor(
+        leg_df["lifeline_fraction"] * leg_df["threshold"]
+    ).clip(lower=1.0)
+
+    is_losing_wildcard = leg_df["is_wildcard_leg"] & ~leg_df["leg_won"]
+    leg_df["is_saveable_losing"] = is_losing_wildcard & (
+        leg_df["n_missed_by"] <= leg_df["wildcard_value"]
+    )
+    leg_df["is_unsaveable_losing"] = is_losing_wildcard & (
+        leg_df["n_missed_by"] > leg_df["wildcard_value"]
     )
 
+    return leg_df
+
+
+def build_bets(leg_df: pd.DataFrame) -> pd.DataFrame:
     # Flag: all losing legs are wildcard legs (NaN for winning bets → fill False)
     all_losing_are_wildcard = (
         leg_df.loc[~leg_df["leg_won"]]
@@ -100,7 +167,7 @@ def build_bets(leg_df: pd.DataFrame) -> pd.DataFrame:
         season=("year", "first"),
         user_residence_state=("user_residence_state", "first"),
         event_country=("event_country", "first"),
-        band=("pre_gen_ngr_band", "first"),
+        tier=("tier", "first"),
         event_date=("date", "first"),
         turnover_bonus_bet=("turnover_bonus_bet", "sum"),
         turnover_cash=("turnover_cash", "sum"),
@@ -110,15 +177,16 @@ def build_bets(leg_df: pd.DataFrame) -> pd.DataFrame:
         gross_win=("gross_win_cash", "sum"),
         net_win=("net_win", "sum"),
         n_legs=("sgm_leg_count", "max"),
-        n_disp_legs=("is_wildcard_leg", "sum"),
+        n_wildcard_legs=("is_wildcard_leg", "sum"),
         n_winning_legs=("leg_won", "sum"),
+        n_saveable_losing_legs=("is_saveable_losing", "sum"),
+        n_unsaveable_losing_legs=("is_unsaveable_losing", "sum"),
     )
     bets["bet_won"] = bets["payout"] < 0
     bets["lost_by_one_leg"] = bets["n_legs"] - bets["n_winning_legs"] == 1
     bets["liability"] = bets["turnover_total"] * bets["bet_fixed_odds"].astype(float)
     bets["n_losing_legs"] = bets["n_legs"] - bets["n_winning_legs"]
 
-    bets = bets.merge(wildcard_miss_by, how="left", left_index=True, right_index=True)
     bets = bets.merge(
         all_losing_are_wildcard, how="left", left_index=True, right_index=True
     )
@@ -148,30 +216,13 @@ def add_fees(
 
 def define_lifeline_product() -> pd.DataFrame:
     legs = [4, 5, 6, 7, 8, 9, 10, 11, 12]
+    n_activations_low = [1, 1, 2, 2, 3, 3, 4, 4, 4]
+    n_activations_high = [2, 2, 3, 3, 3, 3, 4, 4, 4]
     return pd.DataFrame(
         data=dict(
             tier=["low"] * 9 + ["high"] * 9,
             legs=legs + legs,
-            lifelines=[
-                [1],
-                [1],
-                [2, 2],
-                [2, 2],
-                [2, 2, 2],
-                [2, 2, 2],
-                [2, 2, 2, 2],
-                [2, 2, 2, 2],
-                [2, 2, 2, 2],
-                [2],
-                [2],
-                [4, 4],
-                [4, 4],
-                [3, 3, 3],
-                [3, 3, 3],
-                [4, 4, 4, 4],
-                [4, 4, 4, 4],
-                [4, 4, 4, 4],
-            ],
+            n_activations=n_activations_low + n_activations_high,
         )
     )
 
@@ -185,8 +236,6 @@ def run_tier_analysis(
     tier_name: str,
     season: int = 2025,
 ) -> pd.DataFrame:
-
-    # Cost up each lifeline
     results = []
     for row in tqdm(
         lifeline_product.loc[lifeline_product.tier == tier_name].itertuples(
@@ -194,13 +243,15 @@ def run_tier_analysis(
         ),
         desc=tier_name,
     ):
-        tmp = lifeline_summary(bets_tier, n_legs=row.legs, lifelines=row.lifelines)
+        tmp = lifeline_summary(
+            bets_tier, n_legs=row.legs, n_activations=row.n_activations
+        )
         tmp.insert(0, "n_legs", row.legs)
-        tmp.insert(1, "lifelines", ",".join(str(l) for l in row.lifelines))
+        tmp.insert(1, "n_activations", row.n_activations)
         tmp["gross_win_all_lifeline_eligible_bets"] = bets_tier.loc[
             (bets_tier.season == season)
             & (bets_tier.n_legs == row.legs)
-            & (bets_tier.n_disp_legs >= len(row.lifelines)),
+            & (bets_tier.n_wildcard_legs >= row.n_activations),
             "gross_win",
         ].sum()
         results.append(tmp)
@@ -227,8 +278,6 @@ def print_summary(
     lifeline_product: pd.DataFrame,
     season: int = 2025,
 ) -> None:
-
-    # Calculate a few useful numbers
     total_cost = (
         low_final.loc[season, "expected_payout"].sum()
         + high_final.loc[season, "expected_payout"].sum()
@@ -269,17 +318,16 @@ def print_summary(
 
 if __name__ == "__main__":
 
-    # Work through the stages
-    # Get our data and add things like 'n_missed_by'.
     leg_df = load_legs()
     leg_df = engineer_leg_features(leg_df)
+    leg_df = assign_lifeline_values(leg_df, LIFELINE_VALUES)
 
     rpf_taxes, poc_taxes = load_fees()
     bets = build_bets(leg_df)
     bets = add_fees(bets, rpf_taxes, poc_taxes)
 
-    low = bets.loc[bets.band.isin(LOW_BANDS)]
-    high = bets.loc[bets.band.isin(HIGH_BANDS)]
+    low = bets.loc[bets.tier == "low"]
+    high = bets.loc[bets.tier == "high"]
 
     lifeline_product = define_lifeline_product()
     low_final = run_tier_analysis(low, lifeline_product, "low")
